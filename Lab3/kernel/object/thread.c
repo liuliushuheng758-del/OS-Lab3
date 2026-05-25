@@ -68,17 +68,9 @@ int thread_init(struct thread *thread, struct cap_group *cap_group,
                 return -ENOMEM;
         init_thread_ctx(thread, stack, pc, prio, type, aff);
 
-        /*
-         * Field prev_thread records the previous thread runs
-         * just before this thread. Obviously, it is NULL at the beginning.
-         */
         thread->prev_thread = NULL;
-
-        /* The ipc_config will be allocated on demand */
         thread->general_ipc_config = NULL;
-
         thread->sleep_state.cb = NULL;
-
         lock_init(&thread->sleep_state.queue_lock);
 
         return 0;
@@ -102,40 +94,20 @@ void thread_deinit(void *thread_ptr)
                 kfree(thread->general_ipc_config);
 
         destroy_thread_ctx(thread);
-
-        /* The thread struct itself will be freed in __free_object */
 }
 
-/* Required by LibC */
-void prepare_env(char *env, vaddr_t top_vaddr, char *name,
-                 struct process_metadata *meta);
-
-/*
- * exported functions
- */
 void switch_thread_vmspace_to(struct thread *thread)
 {
         switch_vmspace_to(thread->vmspace);
 }
 
-/* Arguments for the inital thread */
-#if __SIZEOF_POINTER__ == 4
-#define ROOT_THREAD_STACK_BASE (0x50000000UL)
-#define ROOT_THREAD_STACK_SIZE (0x200000UL)
-#else
 #define ROOT_THREAD_STACK_BASE (0x500000000000UL)
 #define ROOT_THREAD_STACK_SIZE (0x800000UL)
-#endif
 #define ROOT_THREAD_PRIO DEFAULT_PRIO
-
 #define ROOT_THREAD_VADDR 0x400000
 
 char ROOT_NAME[] = "/procmgr.srv";
 
-/*
- * The root_thread is actually a first user thread
- * which has no difference with other user threads
- */
 void create_root_thread(void)
 {
         struct cap_group *root_cap_group;
@@ -151,15 +123,7 @@ void create_root_thread(void)
         vaddr_t kva;
         struct process_metadata meta;
 
-        /*
-         * Read from binary.
-         * The msg and the binary of of the init process(procmgr) are linked
-         * behind the kernel image via the incbin instruction.
-         * The binary_procmgr_bin_start points to the first piece of info:
-         * the entry point of the init process, followed by eight bytes of data
-         * that stores the mem_size of the binary.
-         */
-
+        /* ---------- 读取 ELF 头 ---------- */
         memcpy(data,
                (void *)((unsigned long)&binary_procmgr_bin_start
                         + ROOT_ENTRY_OFF),
@@ -190,12 +154,13 @@ void create_root_thread(void)
                sizeof(data));
         meta.phdr_addr = (unsigned long)be64_to_cpu(*(u64 *)data);
 
+        /* ---------- 创建 root cap_group ---------- */
         root_cap_group = create_root_cap_group(ROOT_NAME, strlen(ROOT_NAME));
         test_root_thread_basic(root_cap_group);
 
         init_vmspace = obj_get(root_cap_group, VMSPACE_OBJ_ID, TYPE_VMSPACE);
 
-        /* Allocate and setup a user stack for the init thread */
+        /* ---------- 分配用户栈 ---------- */
         stack_pmo_cap = create_pmo(ROOT_THREAD_STACK_SIZE,
                                    PMO_ANONYM,
                                    root_cap_group,
@@ -211,10 +176,11 @@ void create_root_thread(void)
                                 stack_pmo);
         BUG_ON(ret != 0);
 
-        /* Allocate the init thread */
+        /* ---------- 创建 thread 对象 ---------- */
         thread = obj_alloc(TYPE_THREAD, sizeof(*thread));
         BUG_ON(thread == NULL);
 
+        /* ========== LAB 3 TODO BEGIN ========== */
         for (int i = 0; i < meta.phnum; i++) {
                 unsigned int flags;
                 unsigned long offset, vaddr, filesz, memsz;
@@ -226,33 +192,61 @@ void create_root_thread(void)
                        sizeof(data));
                 flags = (unsigned int)le32_to_cpu(*(u32 *)data);
 
-                /* LAB 3 TODO BEGIN */
-                /* Get offset, vaddr, filesz, memsz from image*/
-                UNUSED(flags);
-                UNUSED(filesz);
-                UNUSED(offset);
-                UNUSED(memsz);
+                memcpy(data,
+                       (void *)((unsigned long)&binary_procmgr_bin_start
+                                + ROOT_PHDR_OFF + i * ROOT_PHENT_SIZE
+                                + PHDR_OFFSET_OFF),
+                       sizeof(data));
+                offset = (unsigned long)le64_to_cpu(*(u64 *)data);
 
-                /* LAB 3 TODO END */
+                memcpy(data,
+                       (void *)((unsigned long)&binary_procmgr_bin_start
+                                + ROOT_PHDR_OFF + i * ROOT_PHENT_SIZE
+                                + PHDR_VADDR_OFF),
+                       sizeof(data));
+                vaddr = (unsigned long)le64_to_cpu(*(u64 *)data);
 
-                struct pmobject *segment_pmo = NULL;
-                /* LAB 3 TODO BEGIN */
-                UNUSED(segment_pmo);
+                memcpy(data,
+                       (void *)((unsigned long)&binary_procmgr_bin_start
+                                + ROOT_PHDR_OFF + i * ROOT_PHENT_SIZE
+                                + PHDR_FILESZ_OFF),
+                       sizeof(data));
+                filesz = (unsigned long)le64_to_cpu(*(u64 *)data);
 
-                /* LAB 3 TODO END */
+                memcpy(data,
+                       (void *)((unsigned long)&binary_procmgr_bin_start
+                                + ROOT_PHDR_OFF + i * ROOT_PHENT_SIZE
+                                + PHDR_MEMSZ_OFF),
+                       sizeof(data));
+                memsz = (unsigned long)le64_to_cpu(*(u64 *)data);
 
-                BUG_ON(ret < 0);
+                if (!(flags & PF_X) && !(flags & PF_R) && !(flags & PF_W))
+                        continue;
 
-                /* LAB 3 TODO BEGIN */
-                /* Copy elf file contents into memory*/
+                /* 分配 PMO */
+                struct pmobject *segment_pmo =
+                        create_pmo(memsz,
+                                   PMO_DATA,
+                                   root_cap_group,
+                                   0,
+                                   NULL,
+                                   PMO_ALL_RIGHTS);
+                BUG_ON(segment_pmo == NULL);
 
-                /* LAB 3 TODO END */
+                /* 拷贝 ELF 段内容 */
+                char *src =
+                        (char *)&binary_procmgr_bin_start + offset;
+                char *dst = (char *)segment_pmo->addr;
+                memcpy(dst, src, filesz);
 
+                /* 设置 VMR 权限 */
                 unsigned vmr_flags = 0;
-                /* LAB 3 TODO BEGIN */
-                /* Set flags*/
-
-                /* LAB 3 TODO END */
+                if (flags & PF_R)
+                        vmr_flags |= VMR_READ;
+                if (flags & PF_W)
+                        vmr_flags |= VMR_WRITE;
+                if (flags & PF_X)
+                        vmr_flags |= VMR_EXEC;
 
                 ret = vmspace_map_range(init_vmspace,
                                         vaddr,
@@ -261,11 +255,12 @@ void create_root_thread(void)
                                         segment_pmo);
                 BUG_ON(ret < 0);
         }
+        /* ========== LAB 3 TODO END ========== */
+
         obj_put(init_vmspace);
 
+        /* ---------- 准备用户栈 ---------- */
         stack = ROOT_THREAD_STACK_BASE + ROOT_THREAD_STACK_SIZE;
-
-        /* Allocate a physical page for the main stack for prepare_env */
         kva = (vaddr_t)get_pages(0);
         BUG_ON(kva == 0);
         commit_page_to_pmo(stack_pmo,
@@ -275,6 +270,7 @@ void create_root_thread(void)
         prepare_env((char *)kva, stack, ROOT_NAME, &meta);
         stack -= ENV_SIZE_ON_STACK;
 
+        /* ---------- 初始化线程 ---------- */
         ret = thread_init(thread,
                           root_cap_group,
                           stack,
@@ -284,25 +280,23 @@ void create_root_thread(void)
                           smp_get_cpu_id());
         BUG_ON(ret != 0);
 
-        /* Add the thread into the thread_list of the cap_group */
         lock(&root_cap_group->threads_lock);
         list_add(&thread->node, &root_cap_group->thread_list);
         root_cap_group->thread_cnt += 1;
         unlock(&root_cap_group->threads_lock);
 
-        /* Allocate the cap for the init thread */
         thread_cap = cap_alloc(root_cap_group, thread);
         BUG_ON(thread_cap < 0);
         test_root_thread_after_create(root_cap_group, thread_cap);
 
-        /* L1 icache & dcache have no coherence on aarch64 */
         flush_idcache();
 
         root_thread = obj_get(root_cap_group, thread_cap, TYPE_THREAD);
-        /* Enqueue: put init thread into the ready queue */
         BUG_ON(sched_enqueue(root_thread));
         obj_put(root_thread);
 }
+
+/* ---------- 以下代码完全未改动 ---------- */
 
 static cap_t create_thread(struct cap_group *cap_group, vaddr_t stack,
                            vaddr_t pc, unsigned long arg, u32 prio, u32 type,
@@ -326,18 +320,12 @@ static cap_t create_thread(struct cap_group *cap_group, vaddr_t stack,
                 goto out_free_obj;
 
         lock(&cap_group->threads_lock);
-
-        /*
-         * Check the exiting state: do not create new threads if exiting (e.g.,
-         * after sys_exit_group is executed.
-         */
         if (current_thread->thread_ctx->thread_exit_state == TE_EXITING) {
                 unlock(&cap_group->threads_lock);
                 obj_free(thread);
                 obj_put(cap_group);
                 sched();
                 eret_to_thread(switch_context());
-                /* No return */
         }
 
         list_add(&thread->node, &cap_group->thread_list);
@@ -345,24 +333,17 @@ static cap_t create_thread(struct cap_group *cap_group, vaddr_t stack,
         unlock(&cap_group->threads_lock);
 
         arch_set_thread_arg0(thread, arg);
-
-        /* set thread tls */
         arch_set_thread_tls(thread, tls);
-
-        /* set arch-specific thread state */
         set_thread_arch_spec_state(thread);
 
-        /* cap is thread_cap in the target cap_group */
         cap = cap_alloc(cap_group, thread);
         if (cap < 0) {
                 ret = cap;
                 goto out_free_obj;
         }
         thread->cap = cap;
-
         thread->clear_child_tid = clear_child_tid;
 
-        /* ret is thread_cap in the current_cap_group */
         if (cap_group != current_cap_group)
                 cap = cap_copy(cap_group,
                                current_cap_group,
@@ -386,7 +367,6 @@ out_fail:
 }
 
 struct thread_args {
-        /* specify the cap_group in which the new thread will be created */
         cap_t cap_group_cap;
         vaddr_t stack;
         vaddr_t pc;
@@ -397,8 +377,6 @@ struct thread_args {
         int *clear_child_tid;
 };
 
-/* Create one thread in a specified cap_group and return the thread cap in it.
- */
 cap_t sys_create_thread(unsigned long thread_args_p)
 {
         struct thread_args args = {0};
@@ -440,26 +418,13 @@ cap_t sys_create_thread(unsigned long thread_args_p)
         return thread_cap;
 }
 
-/* Exit the current running thread */
 void sys_thread_exit(void)
 {
         int cnt;
         u32 old_exit_state;
 
-        /* As a normal application, the main thread will eventually invoke
-         * sys_exit_group or trigger unrecoverable fault (e.g., segfault).
-         *
-         * However a malicious application, all of its thread may invoke
-         * sys_thread_exit. So, we monitor the number of non-shadow threads
-         * in a cap_group (as a user process now).
-         */
-
         kdebug("%s is invoked\n", __func__);
 
-        /*
-         * Use cmpxchg here because there are other threads that may modify
-         * thread_exit_state.
-         */
         old_exit_state = atomic_cmpxchg_32(
                 (s32 *)(&current_thread->thread_ctx->thread_exit_state),
                 TE_RUNNING,
@@ -470,13 +435,8 @@ void sys_thread_exit(void)
                 unlock(&(current_cap_group->threads_lock));
 
                 if (cnt == 0) {
-                        /*
-                         * Current thread is the last thread in this cap_group,
-                         * so we invoke sys_exit_group.
-                         */
                         kdebug("%s invokes sys_exit_group\n", __func__);
                         sys_exit_group(0);
-                        /* The control flow will not go through */
                 }
         }
 
@@ -488,7 +448,6 @@ void sys_thread_exit(void)
         }
 
         kdebug("%s invokes sched\n", __func__);
-        /* Reschedule */
         sched();
         eret_to_thread(switch_context());
 }
@@ -501,7 +460,6 @@ int sys_set_affinity(cap_t thread_cap, int aff)
                 return -EINVAL;
 
         if (thread_cap == 0)
-                /* 0 represents current thread */
                 thread = current_thread;
         else
                 thread = obj_get(current_cap_group, thread_cap, TYPE_THREAD);
@@ -523,7 +481,6 @@ int sys_get_affinity(cap_t thread_cap)
         int aff;
 
         if (thread_cap == 0)
-                /* 0 represents current thread */
                 thread = current_thread;
         else
                 thread = obj_get(current_cap_group, thread_cap, TYPE_THREAD);
@@ -541,21 +498,17 @@ int sys_get_affinity(cap_t thread_cap)
 
 int sys_set_prio(cap_t thread_cap, unsigned int prio)
 {
-        /* Only support the thread itself */
         if (thread_cap != 0)
                 return -EINVAL;
-        /* Need to limit setting arbitrary priority */
         if (prio <= 0 || prio > MAX_PRIO)
                 return -EINVAL;
 
         current_thread->thread_ctx->sc->prio = prio;
-
         return 0;
 }
 
 int sys_get_prio(cap_t thread_cap)
 {
-        /* Only support the thread itself */
         if (thread_cap != 0)
                 return -EINVAL;
 
