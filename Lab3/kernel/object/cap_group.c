@@ -335,82 +335,79 @@ cap_t sys_create_cap_group(unsigned long cap_group_args_p)
                 return r;
 
         if (check_user_addr_range((vaddr_t)cap_group_args_p,
-                                  sizeof(struct cap_group_args))
-            != 0)
+                                  sizeof(struct cap_group_args)) != 0)
                 return -EINVAL;
 
-        r = copy_from_user(
-                &args, (void *)cap_group_args_p, sizeof(struct cap_group_args));
-        if (r) {
+        r = copy_from_user(&args,
+                           (void *)cap_group_args_p,
+                           sizeof(struct cap_group_args));
+        if (r)
                 return -EINVAL;
-        }
 
-        /* cap current cap_group */
-        /* LAB 3 TODO BEGIN */
-        /* Allocate a new cap_group object */
-        new_cap_group = obj_alloc(sizeof(struct cap_group), OBJ_CAP_GROUP);
-        /* LAB 3 TODO END */
+        /* ===== LAB 3 TODO BEGIN ===== */
+        new_cap_group = obj_alloc(TYPE_CAP_GROUP, sizeof(struct cap_group));
         if (!new_cap_group) {
                 r = -ENOMEM;
                 goto out_fail;
         }
-        /* LAB 3 TODO BEGIN */
-        /* initialize cap group from user*/
-        r = cap_group_init_user(new_cap_group, DEFAULT_SLOTS_SIZE, &args);
-        if (r < 0) {
-                goto out_fail;
+
+        vmspace = obj_alloc(TYPE_VMSPACE, sizeof(struct vmspace));
+        if (!vmspace) {
+                r = -ENOMEM;
+                goto out_free_obj_new_grp;
         }
-        /* LAB 3 TODO END */
+
+        r = cap_group_init_user(new_cap_group, BASE_OBJECT_NUM, &args);
+        if (r != 0)
+                goto out_free_obj_vmspace;
+        /* ===== LAB 3 TODO END ===== */
 
         cap = cap_alloc(current_cap_group, new_cap_group);
         if (cap < 0) {
                 r = cap;
-                goto out_free_obj_new_grp;
+                goto out_free_obj_vmspace;
         }
 
-        /* 1st cap is cap_group */
+        /* 1st cap: cap_group itself */
         if (cap_copy(current_thread->cap_group,
                      new_cap_group,
                      cap,
                      CAP_RIGHT_NO_RIGHTS,
                      CAP_RIGHT_NO_RIGHTS)
             != CAP_GROUP_OBJ_ID) {
-                kwarn("%s: cap_copy fails or cap[0] is not cap_group\n",
-                      __func__);
+                kwarn("%s: cap[0] is not cap_group\n", __func__);
                 r = -ECAPBILITY;
                 goto out_free_cap_grp_current;
         }
 
-        /* 2st cap is vmspace */
-        /* LAB 3 TODO BEGIN */
-        vmspace = obj_alloc(sizeof(struct vmspace), OBJ_VMSPACE);
-        if (!vmspace) {
-                r = -ENOMEM;
-                goto out_free_obj_new_grp;
+        /* 2nd cap: vmspace */
+        /* ===== LAB 3 TODO BEGIN ===== */
+        if (cap_copy(current_thread->cap_group,
+                     vmspace,
+                     VMSPACE_OBJ_ID,
+                     CAP_RIGHT_NO_RIGHTS,
+                     CAP_RIGHT_NO_RIGHTS)
+            != VMSPACE_OBJ_ID) {
+                kwarn("%s: cap[1] is not vmspace\n", __func__);
+                r = -ECAPBILITY;
+                goto out_free_cap_grp_current;
         }
-        /* LAB 3 TODO END */
-
-        if (!vmspace) {
-                r = -ENOMEM;
-                goto out_free_obj_vmspace;
-        }
+        /* ===== LAB 3 TODO END ===== */
 
         vmspace_init(vmspace, args.pcid);
 
         r = cap_alloc(new_cap_group, vmspace);
         if (r != VMSPACE_OBJ_ID) {
-                kwarn("%s: cap_copy fails or cap[1] is not vmspace\n",
-                      __func__);
                 r = -ECAPBILITY;
                 goto out_free_obj_vmspace;
         }
 
         return cap;
+
 out_free_obj_vmspace:
         obj_free(vmspace);
 out_free_cap_grp_current:
         cap_free(current_cap_group, cap);
-        new_cap_group = NULL;
 out_free_obj_new_grp:
         obj_free(new_cap_group);
 out_fail:
@@ -418,50 +415,49 @@ out_fail:
 }
 
 /* This is for creating the first (init) user process. */
-/* This is for creating the first (init) user process. */
 struct cap_group *create_root_cap_group(char *name, size_t name_len)
 {
         struct cap_group *cap_group = NULL;
         struct vmspace *vmspace = NULL;
         cap_t slot_id;
 
-        /* LAB 3 TODO BEGIN */
-        UNUSED(vmspace);
-        UNUSED(cap_group);
+       /* LAB 3 TODO BEGIN */
+cap_group = obj_alloc(TYPE_CAP_GROUP, sizeof(*cap_group));
+/* LAB 3 TODO END */
 
-        /* LAB 3 TODO END */
-        BUG_ON(!cap_group);
+BUG_ON(!cap_group);
 
-        /* LAB 3 TODO BEGIN */
-        /* initialize cap group with common, use ROOT_CAP_GROUP_BADGE */
-        cap_group = obj_alloc(sizeof(struct cap_group), OBJ_CAP_GROUP);
-        vmspace = obj_alloc(sizeof(struct vmspace), OBJ_VMSPACE);
-        cap_group_init_common(cap_group, DEFAULT_SLOTS_SIZE, ROOT_CAP_GROUP_BADGE);
-        /* LAB 3 TODO END */
-        slot_id = cap_alloc(cap_group, cap_group);
+/* LAB 3 TODO BEGIN */
+/* Initialize cap_group, use ROOT_CAP_GROUP_BADGE as */
+cap_group_init(cap_group,
+               BASE_OBJECT_NUM,
+               /* Fixed badge */ ROOT_CAP_GROUP_BADGE);
+/* LAB 3 TODO END */
 
-        BUG_ON(slot_id != CAP_GROUP_OBJ_ID);
+/* Allocate slot for root process's cap_group object */
+slot_id = cap_alloc(cap_group, cap_group);
 
-        /* LAB 3 TODO BEGIN */
-        slot_id = cap_alloc(cap_group, vmspace);
-        /* LAB 3 TODO END */
-        BUG_ON(!vmspace);
+BUG_ON(slot_id != CAP_GROUP_OBJ_ID);
 
-        /* fixed PCID 1 for root process, PCID 0 is not used. */
-        vmspace_init(vmspace, ROOT_PROCESS_PCID);
+/* LAB 3 TODO BEGIN */
+/* Create vspace object of type VSPACE, sizeof(vspace) */
+slot_id = obj_create(TYPE_VSPACE, sizeof(vspace));
+/* LAB 3 TODO END */
 
-        /* LAB 3 TODO BEGIN */
+/* Fixed PCB for root process, PCB 0 is not used. */
+vspace_init(vspace, ROOT_PROCESS_PID);
 
-        /* LAB 3 TODO END */
+/* LAB 3 TODO BEGIN */
+slot_id = cap_init(cap_group, vspace);
+/* LAB 3 TODO END */
 
-        BUG_ON(slot_id != VMSPACE_OBJ_ID);
+BUG_ON(slot_id != VSPACE_OBJ_ID);
 
-        /* Set the cap_group_name (process_name) for easing debugging */
-        memset(cap_group->cap_group_name, 0, MAX_GROUP_NAME_LEN + 1);
-        if (name_len > MAX_GROUP_NAME_LEN)
-                name_len = MAX_GROUP_NAME_LEN;
-        memcpy(cap_group->cap_group_name, name, name_len);
+/* Set the cap_group_name (process name) for easing debugging */
+if (name_len > MAX_GROUP_NAME_LEN)
+    name_len = MAX_GROUP_NAME_LEN;
+memcpy(cap_group->cap_group_name, name, name_len);
 
-        root_cap_group = cap_group;
-        return cap_group;
+root.cap_group = cap_group;
+return cap_group;
 }
